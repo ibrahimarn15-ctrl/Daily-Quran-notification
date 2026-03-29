@@ -1,96 +1,124 @@
 // -------------------------
-// sw.js
-// Daily Quran Notification Service Worker
+// sw.js (FINAL VERSION)
+// Daily Quran Notification (API Based)
 // -------------------------
 
 self.addEventListener('install', e => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 
-// Listen to messages from main page
+let settings = {
+  ayatPerDay: 1,
+  langs: ['bn'],
+  audio: false
+};
+
+let isActive = false;
+
+// 🔥 Receive settings from main JS
 self.addEventListener('message', event => {
-    if(event.data === "start"){
-        initNotifications();
-    }
+  if(event.data.type === "start"){
+    settings = event.data.settings;
+    isActive = true;
+    sendNotification(); // start immediately
+  }
+
+  if(event.data.type === "stop"){
+    isActive = false;
+  }
 });
 
-// Main function: fetch JSON & schedule notification
-function initNotifications(){
-    const ayatPerDay = parseInt(localStorage.getItem('ayatPerDay')) || 1;
-    const langs = JSON.parse(localStorage.getItem('selectedLangs') || '["bn"]');
-    const audioEnabled = localStorage.getItem('audioEnable') === 'true';
-    const jsonURL = 'https://ibrahimarn15-ctrl.github.io/Daily-Quran-notification/quran.json';
+// 🔥 Get random ayat (API)
+async function getAyat(){
+  const randomSurah = Math.floor(Math.random()*114)+1;
+  const randomAyah = Math.floor(Math.random()*286)+1;
 
-    caches.open('ayat-cache').then(cache => {
-        cache.match('lastIndex').then(res => {
-            res?.json().then(lastIndex => {
-                fetchAndNotify(jsonURL, lastIndex || 0, ayatPerDay, langs, audioEnabled);
-            }).catch(()=> fetchAndNotify(jsonURL, 0, ayatPerDay, langs, audioEnabled));
-        }).catch(()=> fetchAndNotify(jsonURL, 0, ayatPerDay, langs, audioEnabled));
+  try{
+    const res = await fetch(`https://api.alquran.cloud/v1/ayah/${randomSurah}:${randomAyah}/editions/quran-uthmani,bn.bengali,en.sahih`);
+    const data = await res.json();
+
+    return {
+      surah: randomSurah,
+      ayah: randomAyah,
+      arabic: data.data[0].text,
+      bn: data.data[1].text,
+      en: data.data[2].text,
+      audio: `https://everyayah.com/data/Alafasy_64kbps/${String(randomSurah).padStart(3,'0')}${String(randomAyah).padStart(3,'0')}.mp3`
+    };
+  }catch(e){
+    console.log("API error", e);
+    return null;
+  }
+}
+
+// 🔥 Show notification
+async function sendNotification(){
+
+  if(!isActive) return;
+
+  for(let i=0; i<settings.ayatPerDay; i++){
+
+    const ayat = await getAyat();
+    if(!ayat) continue;
+
+    let bodyText = ayat.arabic + "\n\n";
+
+    settings.langs.forEach(l=>{
+      if(l === "bn") bodyText += ayat.bn + "\n\n";
+      if(l === "en") bodyText += ayat.en + "\n\n";
     });
-}
 
-// Fetch JSON & show notification
-function fetchAndNotify(url, lastIndex, ayatPerDay, langs, audioEnabled){
-    fetch(url)
-      .then(res => res.json())
-      .then(ayats => {
-          let index = lastIndex;
-
-          for(let i=0; i<ayatPerDay; i++){
-              const ayat = ayats[index];
-
-              let bodyText = ayat.arabic + "\n";
-              langs.forEach(l=>{
-                  if(ayat.translation[l]) bodyText += ayat.translation[l] + "\n";
-              });
-
-              self.registration.showNotification(`${ayat.surah} : ${ayat.ayah}`, {
-                  body: bodyText.trim(),
-                  icon: "https://i.ibb.co/youricon.png", // <-- Update your icon if needed
-                  vibrate: [200,100,200],
-                  actions: [
-                      { action: "audio", title: "🔊 Listen Audio" },
-                      { action: "open", title: "🌐 Open Site" }
-                  ],
-                  data: {
-                      url: "https://ibrahimarn15-ctrl.github.io/Daily-Quran-notification/",
-                      audio: ayat.audio
-                  }
-              });
-
-              if(audioEnabled){
-                  clients.matchAll().then(clientsArr=>{
-                      clientsArr.forEach(client=>{
-                          client.postMessage({type:'PLAY_AUDIO', url: ayat.audio});
-                      });
-                  });
-              }
-
-              index++;
-              if(index >= ayats.length) index = 0;
-          }
-
-          // Save lastIndex
-          caches.open('ayat-cache').then(cache=>{
-              cache.put('lastIndex', new Response(JSON.stringify(index)));
-          });
-
-          // Schedule next day
-          setTimeout(()=> fetchAndNotify(url, index, ayatPerDay, langs, audioEnabled), 24*60*60*1000);
-      });
-}
-
-// Notification click handler
-self.addEventListener('notificationclick', function(event){
-    event.notification.close();
-    const url = event.notification.data?.url;
-
-    event.waitUntil(
-        clients.matchAll({ type: "window", includeUncontrolled: true }).then(windowClients=>{
-            for(let client of windowClients){
-                if(client.url === url && "focus" in client) return client.focus();
-            }
-            if(clients.openWindow) return clients.openWindow(url);
-        })
+    self.registration.showNotification(
+      `🌙 Surah ${ayat.surah} : Ayah ${ayat.ayah}`,
+      {
+        body: bodyText.trim(),
+        icon: "https://cdn-icons-png.flaticon.com/512/833/833314.png",
+        vibrate: [200,100,200],
+        actions: [
+          { action: "audio", title: "🔊 Listen Audio" },
+          { action: "open", title: "🌐 Open Site" }
+        ],
+        data: {
+          url: "https://ibrahimarn15-ctrl.github.io/Daily-Quran-notification/",
+          audio: ayat.audio
+        }
+      }
     );
+
+    // 🔊 Auto audio
+    if(settings.audio){
+      const clientsArr = await clients.matchAll();
+      clientsArr.forEach(client=>{
+        client.postMessage({type:'PLAY_AUDIO', url: ayat.audio});
+      });
+    }
+  }
+
+  // ⏰ Schedule next (24h)
+  setTimeout(sendNotification, 24*60*60*1000);
+}
+
+// 🔥 Notification click
+self.addEventListener('notificationclick', function(event){
+  event.notification.close();
+
+  if(event.action === "audio"){
+    const audio = event.notification.data.audio;
+    clients.matchAll().then(clientsArr=>{
+      clientsArr.forEach(client=>{
+        client.postMessage({type:'PLAY_AUDIO', url: audio});
+      });
+    });
+    return;
+  }
+
+  const url = event.notification.data.url;
+
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then(windowClients=>{
+      for(let client of windowClients){
+        if(client.url === url && "focus" in client) return client.focus();
+      }
+      if(clients.openWindow) return clients.openWindow(url);
+    })
+  );
 });
